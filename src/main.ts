@@ -87,6 +87,10 @@ async function createWindow() {
     mainWindow.setTitle("SoundCloud");
   });
 
+  mainWindow.webContents.on('did-navigate', async () => {
+    await mainWindow.webContents.session.clearStorageData();
+  });
+	
   const contextMenu = Menu.buildFromTemplate([
     {
       label: 'Back',
