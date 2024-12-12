@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "SoundCloud",
   "author": {
-    "name": "Richard Habitzreuter",
+    "name": "Richard Habitzreuter [fork github/sevcator]",
     "email": "richardhabitzreuter@icloud.com"
   },
   "license": "MIT",
@@ -20,7 +20,7 @@
   },
   "main": "./tsc/main.js",
   "build": {
-    "appId": "com.sevcator.soundcloud.app",
+    "appId": "com.soundcloud",
     "productName": "SoundCloud",
     "asar": true,
     "files": [
@@ -34,8 +34,8 @@
     ],
     "win": {
       "target": "nsis",
-      "icon": "soundcloud-win.ico",
-      "artifactName": "soundcloud-rpc-installer-win.${ext}"
+      "icon": "soundcloud.ico",
+      "artifactName": "soundcloud-installer.${ext}"
     }
   },
   "devDependencies": {
