@@ -1,415 +1,327 @@
 const Store = require('electron-store');
 
-import { app, BrowserWindow, dialog, Menu } from 'electron';
+import { app, BrowserWindow, Menu, dialog, Tray, MenuItem, clipboard, shell } from 'electron';
 import { ElectronBlocker, fullLists } from '@cliqz/adblocker-electron';
 import { readFileSync, writeFileSync } from 'fs';
 
-import { DarkModeCSS } from './themes/dark';
-
+import { DarkModeCSS } from './dark';
 import { ActivityType } from 'discord-api-types/v10';
 import { Client as DiscordClient } from '@xhayper/discord-rpc';
 
-import { authenticateLastFm, scrobbleTrack, updateNowPlaying, shouldScrobble, timeStringToSeconds } from './lastfm/lastfm';
-import { setupLastFmConfig } from './lastfm/lastfm-auth';
-import type { ScrobbleState } from './lastfm/lastfm';
-
 import fetch from 'cross-fetch';
-import { setupDarwinMenu } from './macos/menu';
 
-const { autoUpdater } = require('electron-updater');
 const localShortcuts = require('electron-localshortcut');
 const prompt = require('electron-prompt');
-const clientId = '1090770350251458592';
+const clientId = '1302459809471266838'; 
 const store = new Store();
 
 export interface Info {
-    rpc: DiscordClient;
-    ready: boolean;
-    autoReconnect: boolean;
+  rpc: DiscordClient;
+  ready: boolean;
+  autoReconnect: boolean;
 }
 
-autoUpdater.autoDownload = true;
-autoUpdater.autoInstallOnAppQuit = true;
-
-autoUpdater.on('update-available', () => {
-    injectToastNotification('Update Available');
-});
-
-autoUpdater.on('update-downloaded', () => {
-    injectToastNotification('Update Completed');
-});
-
 const info: Info = {
-    rpc: new DiscordClient({
-        clientId,
-    }),
-    ready: false,
-    autoReconnect: true,
+  rpc: new DiscordClient({ clientId }),
+  ready: false,
+  autoReconnect: true,
 };
+
+// app.commandLine.appendSwitch('js-flags', '--max-old-space-size=200');
+// app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+// app.commandLine.appendSwitch('disable-renderer-backgrounding');
+// app.commandLine.appendSwitch('no-force-async-hooks-checks');
+// app.commandLine.appendSwitch('ignore-certificate-errors');
+// app.commandLine.appendSwitch('no-sandbox');
 
 info.rpc.login().catch(console.error);
 
-if (process.platform === "darwin")
-    setupDarwinMenu();
-else
-    Menu.setApplicationMenu(null);
+Menu.setApplicationMenu(null);
 
 let mainWindow: BrowserWindow | null;
+let tray: Tray | null;
 let blocker: ElectronBlocker;
-let currentScrobbleState: ScrobbleState | null = null;
-let displayWhenIdling = false; // Whether to display a status message when music is paused
-let displaySCSmallIcon = false; // Whether to display the small SoundCloud logo
 
 async function createWindow() {
-    let bounds = store.get('bounds');
-    let maximazed = store.get('maximazed');
+  let displayWhenIdling = false;
 
-    mainWindow = new BrowserWindow({
-        width: bounds ? bounds.width : 1280,
-        height: bounds ? bounds.height : 720,
-        webPreferences: {
-            nodeIntegration: false,
-        },
-    });
+  let bounds = store.get('bounds');
+  let maximized = store.get('maximized');
 
-    if (maximazed) mainWindow.maximize();
+  mainWindow = new BrowserWindow({
+    width: bounds ? bounds.width : 1366,
+    height: bounds ? bounds.height : 768,
+    webPreferences: {
+      nodeIntegration: false,
+    },
+	icon: 'soundcloud.png'
+  });
 
-    // Setup proxy
-    if (store.get('proxyEnabled')) {
-        const { protocol, host } = store.get('proxyData');
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const allowedDomain = 'soundcloud.com';
+    const urlObject = new URL(url);
 
-        await mainWindow.webContents.session.setProxy({
-            proxyRules: `${protocol}//${host}`,
-        });
+    if (!urlObject.hostname.endsWith(`.${allowedDomain}`) && urlObject.hostname !== allowedDomain) {
+      event.preventDefault();
+      console.warn(`Navigation to ${url} blocked. Only ${allowedDomain} and its subdomains are allowed.`);
     }
+  });
 
-    // Load the SoundCloud website
-    mainWindow.loadURL('https://soundcloud.com/discover');
-    
+  mainWindow.webContents.setWindowOpenHandler(() => {
+    console.warn(`Blocked attempt to open a new window.`);
+    return { action: 'deny' };
+  });
+
+  if (maximized) mainWindow.maximize();
+
+  if (store.get('proxyEnabled')) {
+    const { protocol, host } = store.get('proxyData');
+
+    await mainWindow.webContents.session.setProxy({
+      proxyRules: `${protocol}//${host}`,
+    });
+  }
+
+  mainWindow.webContents.on('page-title-updated', (event) => {
+    event.preventDefault();
+    mainWindow.setTitle("SoundCloud");
+  });
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: 'Back',
+      click: () => mainWindow.webContents.canGoBack() && mainWindow.webContents.goBack()
+    },
+    {
+      label: 'Forward',
+      click: () => mainWindow.webContents.canGoForward() && mainWindow.webContents.goForward()
+    },
+    {
+      label: 'Refresh',
+      click: () => mainWindow.webContents.reload()
+    },
+    {
+      label: 'Copy link of current page',
+      click: () => clipboard.writeText(mainWindow.webContents.getURL())
+    }
+  ]);
+
+  mainWindow.webContents.on('context-menu', (event) => {
+    event.preventDefault();
+    contextMenu.popup();
+  });
+
+  mainWindow.loadURL('https://soundcloud.com/discover');
+
+  const executeJS = (script: string) => mainWindow.webContents.executeJavaScript(script);
+
+  mainWindow.webContents.on('did-finish-load', async () => {
     if (store.get('darkMode')) {
-        await mainWindow.webContents.insertCSS(DarkModeCSS);
+      await mainWindow.webContents.insertCSS(DarkModeCSS);
     }
 
-    const executeJS = (script: string) => mainWindow.webContents.executeJavaScript(script);
+    if (store.get('adBlocker')) {
+      blocker = await ElectronBlocker.fromLists(
+        fetch,
+        fullLists,
+        { enableCompression: true },
+        {
+          path: 'engine.bin',
+          read: async (...args) => readFileSync(...args),
+          write: async (...args) => writeFileSync(...args),
+        },
+      );
+      blocker.enableBlockingInSession(mainWindow.webContents.session);
+    }
 
-    autoUpdater.checkForUpdates();
+    setInterval(async () => {
+      const isPlaying = await executeJS(`document.querySelector('.playControls__play').classList.contains('playing')`);
 
-    // Wait for the page to fully load
-    mainWindow.webContents.on('did-finish-load', async () => {
+      if (isPlaying) {
+        const trackInfo = await executeJS(`
+          new Promise(resolve => {
+            const titleEl = document.querySelector('.playbackSoundBadge__titleLink');
+            const authorEl = document.querySelector('.playbackSoundBadge__lightLink');
+            resolve({
+              title: titleEl?.innerText ?? '',
+              author: authorEl?.innerText ?? ''
+            });
+          });
+        `);
 
+        const artworkUrl = await executeJS(`
+          new Promise(resolve => {
+            const artworkEl = document.querySelector('.playbackSoundBadge__avatar .image__lightOutline span');
+            resolve(artworkEl ? artworkEl.style.backgroundImage.slice(5, -2) : '');
+          });
+        `);
 
-        if (store.get('adBlocker')) {
-            const blocker = await ElectronBlocker.fromLists(
-                fetch,
-                fullLists,
-                { enableCompression: true },
-                {
-                    path: 'engine.bin',
-                    read: async (...args) => readFileSync(...args),
-                    write: async (...args) => writeFileSync(...args),
-                },
-            );
-            blocker.enableBlockingInSession(mainWindow.webContents.session);
-        }
+        const [elapsedTime, totalTime] = await Promise.all([
+          executeJS(`document.querySelector('.playbackTimeline__timePassed span:last-child')?.innerText ?? ''`),
+          executeJS(`document.querySelector('.playbackTimeline__duration span:last-child')?.innerText ?? ''`),
+        ]);
 
-        setInterval(async () => {
-            try {
-                const isPlaying = await executeJS(`
-                    document.querySelector('.playControls__play').classList.contains('playing')
-                `);
+        const parseTime = (time: string): number => {
+          const parts = time.split(':').map(Number);
+          return parts.reduce((acc, part) => 60 * acc + part, 0) * 1000;
+        };
 
-                if (isPlaying) {
-                    const trackInfo = await executeJS(`
-                    new Promise(resolve => {
-                        const titleEl = document.querySelector('.playbackSoundBadge__titleLink');
-                        const authorEl = document.querySelector('.playbackSoundBadge__lightLink');
-                        resolve({
-                            title: titleEl?.innerText ?? '',
-                            author: authorEl?.innerText ?? ''
-                        });
-                    });
-                `);
-                    if (!trackInfo.title || !trackInfo.author) {
-                        console.log('Incomplete track info:', trackInfo);
-                        return;
-                    }
+        const elapsedMilliseconds = parseTime(elapsedTime);
+        const totalMilliseconds = parseTime(totalTime);
+        const currentTrack = trackInfo.title.replace(/\n.*/s, '').replace('Current track:', '');
 
-                    console.log(trackInfo.title);
+        info.rpc.user?.setActivity({
+          type: ActivityType.Listening,
+          details: `${shortenString(currentTrack)}ᅠᅠᅠ`,
+          state: `${shortenString(trackInfo.author)}ᅠᅠᅠ`,
+          largeImageKey: artworkUrl.replace('50x50.', '500x500.'),
+          startTimestamp: Date.now() - elapsedMilliseconds,
+          endTimestamp: Date.now() + (totalMilliseconds - elapsedMilliseconds),
+          instance: false,
+        });
+      } else {
+        info.rpc.user?.clearActivity();
+      }
+    }, 10000);
+  });
 
-                    const currentTrack = {
-                        author: trackInfo.author as string,
-                        title: trackInfo.title
-                            .replace(/.*?:\s*/, '') // Remove everything up to and including the first colon.
-                            .replace(/\n.*/, '') // Remove everything after the first newline.
-                            .trim() as string, // Clean up any leading/trailing spaces.
-                    };
+  mainWindow.on('close', function(event) {
+    store.set('bounds', mainWindow.getBounds());
+    store.set('maximized', mainWindow.isMaximized());
+	event.preventDefault();
+	mainWindow.hide();
+  });
 
-                    const artworkUrl = await executeJS(`
-                    new Promise(resolve => {
-                        const artworkEl = document.querySelector('.playbackSoundBadge__avatar .image__lightOutline span');
-                        resolve(artworkEl ? artworkEl.style.backgroundImage.slice(5, -2) : '');
-                    });
-                `);
+  mainWindow.on('closed', function() {
+    mainWindow = null;
+  });
 
-                    const [elapsedTime, totalTime] = await Promise.all([
-                        executeJS(
-                            `document.querySelector('.playbackTimeline__timePassed span:last-child')?.innerText ?? ''`,
-                        ),
-                        executeJS(
-                            `document.querySelector('.playbackTimeline__duration span:last-child')?.innerText ?? ''`,
-                        ),
-                    ]);
+  localShortcuts.register(mainWindow, 'F1', () => toggleDarkMode());
+  localShortcuts.register(mainWindow, 'F2', () => toggleAdBlocker());
+  localShortcuts.register(mainWindow, 'F3', async () => toggleProxy());
+  localShortcuts.register(mainWindow, 'F5', () => mainWindow.webContents.reload()); 
 
-                    await updateNowPlaying(currentTrack, store);
+  localShortcuts.register(mainWindow, ['CmdOrCtrl+B', 'CmdOrCtrl+P'], () => mainWindow.webContents.goBack());
+  localShortcuts.register(mainWindow, ['CmdOrCtrl+F', 'CmdOrCtrl+N'], () => mainWindow.webContents.goForward());
+  localShortcuts.register(mainWindow, ['CmdOrCtrl+F', 'CmdOrCtrl+R'], () => mainWindow.webContents.reload());
 
-                    const parseTime = (time: string): number => {
-                        const parts = time.split(':').map(Number);
-                        return parts.reduce((acc, part) => 60 * acc + part, 0) * 1000;
-                    };
-
-                    const elapsedMilliseconds = parseTime(elapsedTime);
-                    const totalMilliseconds = parseTime(totalTime);
-
-                    if (
-                        !currentScrobbleState ||
-                        currentScrobbleState.artist !== currentTrack.author ||
-                        currentScrobbleState.title !== currentTrack.title
-                    ) {
-                        // Scrobble previous track if it wasn't scrobbled and met criteria
-                        if (
-                            currentScrobbleState &&
-                            !currentScrobbleState.scrobbled &&
-                            shouldScrobble(currentScrobbleState)
-                        ) {
-                            await scrobbleTrack(
-                                {
-                                    author: currentScrobbleState.artist,
-                                    title: currentScrobbleState.title,
-                                },
-                                store,
-                            );
-                        }
-
-                        // Start tracking new track
-                        currentScrobbleState = {
-                            artist: currentTrack.author,
-                            title: currentTrack.title,
-                            startTime: Date.now(),
-                            duration: timeStringToSeconds(trackInfo.duration),
-                            scrobbled: false,
-                        };
-                    } else if (
-                        currentScrobbleState &&
-                        !currentScrobbleState.scrobbled &&
-                        shouldScrobble(currentScrobbleState)
-                    ) {
-                        // Scrobble current track if it meets criteria
-                        await scrobbleTrack(
-                            {
-                                author: currentScrobbleState.artist,
-                                title: currentScrobbleState.title,
-                            },
-                            store,
-                        );
-                        currentScrobbleState.scrobbled = true;
-                    }
-
-                    if (!info.rpc.isConnected) {
-                        if (await !info.rpc.login().catch(console.error)) {
-                            return;
-                        }
-                    }
-
-                    info.rpc.user?.setActivity({
-                        type: ActivityType.Listening,
-                        details: shortenString(currentTrack.title),
-                        state: `${shortenString(trackInfo.author)}`,
-                        largeImageKey: artworkUrl.replace('50x50.', '500x500.'),
-                        startTimestamp: Date.now() - elapsedMilliseconds,
-                        endTimestamp: Date.now() + (totalMilliseconds - elapsedMilliseconds),
-                        smallImageKey: displaySCSmallIcon ? 'soundcloud-logo' : '',
-                        smallImageText: displaySCSmallIcon ? 'SoundCloud' : '',
-                        instance: false,
-                    });
-                } else if (displayWhenIdling) {
-                    info.rpc.user?.setActivity({
-                        details: 'Listening to SoundCloud',
-                        state: 'Paused',
-                        largeImageKey: 'idling',
-                        largeImageText: 'Paused',
-                        smallImageKey: 'soundcloud-logo',
-                        smallImageText: 'SoundCloud',
-                        instance: false,
-                    });
-                } else {
-                    info.rpc.user?.clearActivity();
-                }
-            } catch (error) {
-                console.error('Error during RPC update:', error);
-            }
-        }, 10000);
-    });
-
-    // Emitted when the window is closed.
-    mainWindow.on('close', function () {
-        store.set('bounds', mainWindow.getBounds());
-        store.set('maximazed', mainWindow.isMaximized());
-    });
-
-    mainWindow.on('closed', function () {
-        mainWindow = null;
-    });
-
-    // Register F1 shortcut for toggling dark mode
-    localShortcuts.register(mainWindow, 'F1', () => toggleDarkMode());
-
-    // Register F2 shortcut for toggling the adblocker
-    localShortcuts.register(mainWindow, 'F2', () => toggleAdBlocker());
-
-    // Register F3 shortcut to show the proxy window
-    localShortcuts.register(mainWindow, 'F3', async () => toggleProxy());
-
-    // Register F4 shortcut to connecting to last.fm api
-    localShortcuts.register(mainWindow, 'F4', async () => {
-        const apikey = store.get('lastFmApiKey');
-        const secret = store.get('lastFmSecret');
-        if (!apikey || !secret) {
-            await setupLastFmConfig(mainWindow, store);
-        } else {
-            await authenticateLastFm(mainWindow, store);
-            injectToastNotification('Last.fm authenticated');
-        }
-    });
-
-    localShortcuts.register(mainWindow, ['CmdOrCtrl+B', 'CmdOrCtrl+P'], () => mainWindow.webContents.goBack());
-    localShortcuts.register(mainWindow, ['CmdOrCtrl+F', 'CmdOrCtrl+N'], () => mainWindow.webContents.goForward());
+  createTray();
 }
-// When Electron has finished initializing, create the main window
+
+function toggleDarkMode() {
+  const darkModeEnabled = store.get('darkMode');
+  store.set('darkMode', !darkModeEnabled);
+
+  if (mainWindow) {
+    mainWindow.reload();
+    dialog.showMessageBox({ message: darkModeEnabled ? 'Dark mode disabled' : 'Dark mode enabled', title: ' ', icon: 'soundcloud.png' });
+  }
+}
+
+function createTray() {
+  tray = new Tray('soundcloud.png');
+  const contextMenu = Menu.buildFromTemplate([
+    { label: 'sevcator.github.io', enabled: false },
+	{ label: 'sevcator.t.me', enabled: false },
+    { type: 'separator' },
+    { label: 'Quit', click: () => {
+      if (mainWindow) mainWindow.destroy();
+      if (tray) tray.destroy();
+      app.quit();
+    }}
+  ]);
+
+  tray.setToolTip('SoundCloud');
+  tray.setContextMenu(contextMenu);
+  
+  tray.on('click', () => {
+    if (mainWindow) {
+      mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
+    }
+  });
+}
+
 app.on('ready', createWindow);
 
-// Quit the app when all windows are closed, unless running on macOS (where it's typical to leave apps running)
-app.on('window-all-closed', function () {
-    if (process.platform !== 'darwin') {
-        app.quit();
-    }
+app.on('window-all-closed', function() {
+  if (process.platform !== 'darwin') {
+    if (mainWindow) mainWindow.destroy();
+    if (tray) tray.destroy();
+    app.quit();
+  }
 });
 
-// When the app is activated, create the main window if it doesn't already exist
-app.on('activate', function () {
-    if (mainWindow === null) {
-        createWindow();
-    }
+app.on('activate', function() {
+  if (mainWindow === null) {
+    createWindow();
+  }
 });
 
-//Function to toggle the adblocker
 function toggleAdBlocker() {
-    const adBlockEnabled = store.get('adBlocker');
-    store.set('adBlocker', !adBlockEnabled);
+  const adBlockEnabled = store.get('adBlocker');
+  store.set('adBlocker', !adBlockEnabled);
 
-    if (adBlockEnabled) {
-        if (blocker) blocker.disableBlockingInSession(mainWindow.webContents.session);
-    }
+  if (adBlockEnabled) {
+    if (blocker) blocker.disableBlockingInSession(mainWindow.webContents.session);
+  }
 
-    if (mainWindow) {
-        mainWindow.reload();
-        injectToastNotification(adBlockEnabled ? 'Adblocker disabled' : 'Adblocker enabled');
-    }
+  if (mainWindow) {
+    mainWindow.reload();
+    dialog.showMessageBox({ message: adBlockEnabled ? 'Adblocker disabled' : 'Adblocker enabled', title: ' ', icon: 'soundcloud.png' });
+  }
 }
 
-// Handle proxy authorization
-app.on('login', async (_event, _webContents, _request, authInfo, callback) => {
-    if (authInfo.isProxy) {
-        if (!store.get('proxyEnabled')) {
-            return callback('', '');
-        }
-
-        const { user, password } = store.get('proxyData');
-
-        callback(user, password);
+app.on('login', (_event, _webContents, _request, authInfo, callback) => {
+  if (authInfo.isProxy) {
+    if (!store.get('proxyEnabled')) {
+      return callback('', '');
     }
+
+    const { user, password } = store.get('proxyData');
+    callback(user, password);
+  }
 });
 
-// Function to toggle proxy
 async function toggleProxy() {
-    const proxyUri = await prompt({
-        title: 'Setup Proxy',
-        label: "Enter 'off' to disable the proxy",
-        value: 'http://user:password@ip:port',
-        inputAttrs: {
-            type: 'uri',
-        },
-        type: 'input',
-    });
+  const proxyUri = await prompt({
+    title: ' ',
+    label: "Enter proxy, type 0 to disable proxy",
+    value: "http://user:password@ip:port",
+    inputAttrs: {
+      type: 'uri',
+    },
+    type: 'input',
+	icon: 'soundcloud.png',
+  });
 
-    if (proxyUri === null) return;
+  if (proxyUri === null) return;
 
-    if (proxyUri == 'off') {
-        store.set('proxyEnabled', false);
-
-        dialog.showMessageBoxSync(mainWindow, { message: 'The application needs to restart to work properly' });
-        app.quit();
-    } else {
-        try {
-            const url = new URL(proxyUri);
-            store.set('proxyEnabled', true);
-            store.set('proxyData', {
-                protocol: url.protocol,
-                host: url.host,
-                user: url.username,
-                password: url.password,
-            });
-            dialog.showMessageBoxSync(mainWindow, { message: 'The application needs to restart to work properly' });
-            app.quit();
-        } catch (e) {
-            store.set('proxyEnabled', false);
-            mainWindow.reload();
-            injectToastNotification('Failed to setup proxy.');
-        }
+  if (proxyUri === '0') {
+    store.set('proxyEnabled', false);
+    dialog.showMessageBox({ message: 'The proxy will be disabled after the application is restarted', title: ' ', icon: 'soundcloud.png' });
+	if (mainWindow) mainWindow.destroy();
+    if (tray) tray.destroy();
+    app.quit();
+  } else {
+    try {
+      const url = new URL(proxyUri);
+      store.set('proxyEnabled', true);
+      store.set('proxyData', {
+        protocol: url.protocol,
+        host: url.host,
+        user: url.username,
+        password: url.password,
+      });
+      dialog.showMessageBox({ message: 'The proxy will be applied after the application is restarted', title: ' ', icon: 'soundcloud.png' });
+	  if (mainWindow) mainWindow.destroy();
+      if (tray) tray.destroy();
+      app.quit();
+    } catch (error) {
+      dialog.showMessageBox({ message: 'Failed to setup proxy', title: ' ', icon: 'soundcloud.png' });
     }
-}
-
-//Function to toggle dark mode
-function toggleDarkMode() {
-    const darkModeEnabled = store.get('darkMode');
-    store.set('darkMode', !darkModeEnabled);
-
-    if (mainWindow) {
-        mainWindow.reload();
-        injectToastNotification(darkModeEnabled ? 'Dark mode disabled' : 'Dark mode enabled');
-    }
+  }
 }
 
 function shortenString(str: string): string {
-    return str.length > 128 ? str.substring(0, 128) + '...' : str;
-}
-
-// Function to inject toast notification into the main page
-export function injectToastNotification(message: string) {
-    if (mainWindow) {
-        mainWindow.webContents.executeJavaScript(`
-      const notificationElement = document.createElement('div');
-      notificationElement.style.position = 'fixed';
-      notificationElement.style.bottom = '50px';
-      notificationElement.style.fontSize = '20px';
-      notificationElement.style.left = '50%';
-      notificationElement.style.transform = 'translateX(-50%)';
-      notificationElement.style.backgroundColor = '#333';
-      notificationElement.style.color = '#fff';
-      notificationElement.style.padding = '10px 20px';
-      notificationElement.style.borderRadius = '5px';
-      notificationElement.style.opacity = '0'; 
-      notificationElement.style.transition = 'opacity 0.5s';
-      setTimeout(() => {
-        notificationElement.style.opacity = '1';
-      }, 100); 
-      notificationElement.innerHTML = '${message}';
-      document.body.appendChild(notificationElement);
-      setTimeout(() => {
-        notificationElement.style.opacity = '0';
-        setTimeout(() => {
-          notificationElement.remove();
-        }, 500); 
-      }, 4500); // Duration of showing the notification
-    `);
-    }
+  return str.length > 128 ? str.substring(0, 125) + '...' : str;
 }
