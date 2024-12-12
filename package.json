@@ -35,12 +35,7 @@
     "win": {
       "target": "nsis",
       "icon": "soundcloud-win.ico",
-      "artifactName": "soundcloud-rpc-installer-win.${ext}",
-      "nsis": {
-        "oneClick": false,
-        "allowToChangeInstallationDirectory": true,
-        "include": "build/installer.nsh"
-      }
+      "artifactName": "soundcloud-rpc-installer-win.${ext}"
     }
   },
   "devDependencies": {
