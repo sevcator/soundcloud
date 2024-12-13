@@ -58,7 +58,6 @@ async function createWindow() {
   });
 
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    nativeTheme.themeSource = 'dark';
     const allowedDomain = 'soundcloud.com';
     const urlObject = new URL(url);
 
@@ -89,7 +88,8 @@ async function createWindow() {
   });
 
   mainWindow.webContents.on('did-navigate', async () => {
-    await mainWindow.webContents.session.clearStorageData();
+    await mainWindow.webContents.session.clearCache();
+    nativeTheme.themeSource = 'dark';
   });
 	
   const contextMenu = Menu.buildFromTemplate([
