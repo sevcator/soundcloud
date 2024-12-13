@@ -1,6 +1,6 @@
 const Store = require('electron-store');
 
-import { app, BrowserWindow, Menu, dialog, Tray, MenuItem, clipboard, shell } from 'electron';
+import { app, BrowserWindow, Menu, dialog, Tray, MenuItem, clipboard, shell, nativeTheme } from 'electron';
 import { ElectronBlocker, fullLists } from '@cliqz/adblocker-electron';
 import { readFileSync, writeFileSync } from 'fs';
 
@@ -58,6 +58,7 @@ async function createWindow() {
   });
 
   mainWindow.webContents.on('will-navigate', (event, url) => {
+    nativeTheme.themeSource = 'dark';
     const allowedDomain = 'soundcloud.com';
     const urlObject = new URL(url);
 
