@@ -24,14 +24,3 @@ jobs:
         with:
           github_token: ${{ secrets.github_token }}
           release: ${{ startsWith(github.ref, 'refs/tags/v') }}
-
-      - name: Upload release assets
-        uses: softprops/action-gh-release@v2
-        with:
-          fail_on_unmatched_files: true
-          prerelease: false
-          draft: false
-          body: |
-            ### zapret ${{ github.ref_name }}
-          files: |
-            soundcloud*.exe
