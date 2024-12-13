@@ -29,10 +29,10 @@ const info: Info = {
 
 // app.commandLine.appendSwitch('js-flags', '--max-old-space-size=200');
 // app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
-// app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
 // app.commandLine.appendSwitch('no-force-async-hooks-checks');
 // app.commandLine.appendSwitch('ignore-certificate-errors');
-// app.commandLine.appendSwitch('no-sandbox');
+app.commandLine.appendSwitch('no-sandbox');
 
 info.rpc.login().catch(console.error);
 
@@ -139,6 +139,10 @@ async function createWindow() {
       blocker.enableBlockingInSession(mainWindow.webContents.session);
     }
 
+    setInterval(async () => {
+      await mainWindow.webContents.session.clearCache();
+    }, 20000);	  
+	  
     setInterval(async () => {
       const isPlaying = await executeJS(`document.querySelector('.playControls__play').classList.contains('playing')`);
 
